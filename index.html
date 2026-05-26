@@ -19,6 +19,7 @@
   #root{width:100%;max-width:420px;}
   button{font-family:'Cinzel',Georgia,serif;}
   @keyframes flash{0%,100%{opacity:1}50%{opacity:0.4}}
+  @keyframes spin{to{transform:rotate(360deg)}}
   @keyframes deficitPop{0%{opacity:0;transform:translateX(-50%) translateY(0)}15%{opacity:1;transform:translateX(-50%) translateY(-6px)}80%{opacity:1;transform:translateX(-50%) translateY(-10px)}100%{opacity:0;transform:translateX(-50%) translateY(-14px)}}
 </style>
 </head>
@@ -519,7 +520,13 @@ function App(){
   const[waitingForP2,setWaitingForP2]=useState(false);
   const roomChannelRef=useRef(null);
   const myPlayerRef=useRef(1);
+  const netModeRef=useRef('local');
+  const roomCodeRef=useRef('');
+  const waitingForP2Ref=useRef(false);
   myPlayerRef.current=myPlayer;
+  netModeRef.current=netMode;
+  roomCodeRef.current=roomCode;
+  waitingForP2Ref.current=waitingForP2;
   const[showOptions,setShowOptions]=useState(false);
   const[musicOn,setMusicOn]=useState(true);
   const[captureFlash,setCaptureFlash]=useState(null); // {player, expires}
@@ -684,11 +691,14 @@ function App(){
       delete updatedBoard[fromK];
       updatedBoard[toK]=piece;
       setBoard(updatedBoard);
-      setCooldowns(cd=>({...cd,[toK]:Date.now()+COOLDOWN_MS[piece.type]}));
+      const newCD={...cooldowns,[toK]:Date.now()+COOLDOWN_MS[piece.type]};
+      setCooldowns(newCD);
       checkPromo(toK,piece,player);
       const enemy=player===1?2:1;
       checkKingRetreat(updatedBoard,enemy,new Set());
-      setTimeout(syncState, 50);
+      const p1Snap=player===1?{...p1Ref.current}:null;
+      const p2Snap=player===2?{...p2Ref.current}:null;
+      setTimeout(()=>syncState(updatedBoard,p1Snap,p2Snap,{cooldowns:newCD}), 80);
     }
     setSelected(null);setValidMoves([]);
   }
@@ -772,7 +782,9 @@ function App(){
     setSelected(null);setValidMoves([]);
     const enemyD=player===1?2:1;
     checkKingRetreat(deployedBoard,enemyD,new Set());
-    setTimeout(syncState, 50);
+    const dP1=player===1?{...p1Ref.current}:null;
+    const dP2=player===2?{...p2Ref.current}:null;
+    setTimeout(()=>syncState(deployedBoard,dP1,dP2,{}), 80);
   }
 
   function regenPiece(pieceType,toK,player){
@@ -787,7 +799,9 @@ function App(){
     setSelected(null);setValidMoves([]);
     const enemyR=player===1?2:1;
     checkKingRetreat(regenBoard,enemyR,new Set());
-    setTimeout(syncState, 50);
+    const rP1=player===1?{...p1Ref.current}:null;
+    const rP2=player===2?{...p2Ref.current}:null;
+    setTimeout(()=>syncState(regenBoard,rP1,rP2,{}), 80);
   }
 
   function doGuard(player){
@@ -1165,31 +1179,43 @@ function App(){
       p1: {valor:5, hand:h1.hand, deck:h1.deck, captured:[]},
       p2: {valor:5, hand:h2.hand, deck:h2.deck, captured:[]},
       phase:'playing', timer:180, winner:null,
-      guardedSquare:null, cooldowns:{},
+      guardedSquare:null, cooldowns:{}, lastPlayer:0,
     };
     const ok = await createRoom(code, initState);
     if (!ok) { setNetStatus('Failed to create room. Try again.'); return; }
+    // Set all state synchronously before entering game
     setRoomCode(code);
+    roomCodeRef.current = code;
     setMyPlayer(1);
-    myPlayerRef.current=1;
+    myPlayerRef.current = 1;
+    setNetMode('online');
+    netModeRef.current = 'online';
     setWaitingForP2(true);
-    setNetStatus(`Room created! Code: ${code}`);
-    // Subscribe and wait for player 2
+    waitingForP2Ref.current = true;
+    // Load initial state
+    setBoard(initState.board);
+    setP1({valor:5, hand:h1.hand, deck:h1.deck, captured:[]});
+    setP2({valor:5, hand:h2.hand, deck:h2.deck, captured:[]});
+    setPhase('playing');
+    setTimer(180);
+    // Enter game screen — show waiting overlay
+    setGamePhase('playing');
+    stopTitleMusic(500);
+    if(musicOn) setTimeout(()=>startMusic(),600);
+    // Subscribe — when P2 joins, clear waiting state
     const channel = subscribeToRoom(code, (row) => {
-      if (row.player2_joined && waitingForP2) {
+      if (row.player2_joined && waitingForP2Ref.current) {
         setWaitingForP2(false);
+        waitingForP2Ref.current = false;
         setNetStatus('');
-        applyRemoteState(row.state);
-        setNetMode('online');
-        setGamePhase('playing');
-        stopTitleMusic(500);
-        if(musicOn) setTimeout(()=>startMusic(),600);
+        return; // don't apply state — we just started the game
       }
-      // Normal state sync during game
+      // P2 has joined — apply their moves
       if (!row.player2_joined) return;
       applyRemoteState(row.state);
     });
     roomChannelRef.current = channel;
+    setNetStatus(`Waiting for Player 2 — code: ${code}`);
   }
 
   async function handleJoinGame() {
@@ -1232,22 +1258,34 @@ function App(){
 
   function applyRemoteState(state) {
     if (!state) return;
+    // Don't apply state that we just sent — would cause echo
+    if (state.lastPlayer === myPlayerRef.current) return;
     setBoard(state.board || {});
-    setP1(state.p1);
-    setP2(state.p2);
-    setPhase(state.phase || 'playing');
-    setTimer(state.timer);
+    // Only sync hand/deck/captured — not valor (each client ticks valor locally)
+    if (state.p1) setP1(p => ({ ...p, hand: state.p1.hand, deck: state.p1.deck, captured: state.p1.captured }));
+    if (state.p2) setP2(p => ({ ...p, hand: state.p2.hand, deck: state.p2.deck, captured: state.p2.captured }));
+    if (state.phase) setPhase(state.phase);
     if (state.winner) setWinner(state.winner);
-    setGuardedSquare(state.guardedSquare || null);
-    setCooldowns(state.cooldowns || {});
+    if (state.guardedSquare !== undefined) setGuardedSquare(state.guardedSquare || null);
+    if (state.cooldowns) setCooldowns(state.cooldowns);
     setSelected(null);
     setValidMoves([]);
   }
 
-  async function syncState() {
-    if (netMode !== 'online' || !roomCode) return;
-    const state = serializeState();
-    await pushState(roomCode, state);
+  async function syncState(boardSnapshot, p1Snapshot, p2Snapshot, extraState={}) {
+    if (netModeRef.current !== 'online' || !roomCodeRef.current) return;
+    const state = {
+      board: boardSnapshot,
+      p1: p1Snapshot || { valor: p1Ref.current.valor, hand: p1Ref.current.hand, deck: p1Ref.current.deck, captured: p1Ref.current.captured },
+      p2: p2Snapshot || { valor: p2Ref.current.valor, hand: p2Ref.current.hand, deck: p2Ref.current.deck, captured: p2Ref.current.captured },
+      phase: phaseRef.current,
+      timer: extraState.timer !== undefined ? extraState.timer : null,
+      winner: extraState.winner || null,
+      guardedSquare: extraState.guardedSquare || null,
+      cooldowns: extraState.cooldowns || {},
+      lastPlayer: myPlayerRef.current,
+    };
+    await pushState(roomCodeRef.current, state);
   }
 
   function resetGame(){
@@ -1267,7 +1305,15 @@ function App(){
         <span style={{fontSize:10,color:C.textMuted}}>LOCAL 2P</span>
       </div>
       {netMode==='local'&&renderPlayerSection(2)}
-      {netMode==='online'&&(
+      {netMode==='online'&&waitingForP2&&(
+        <div style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.88)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:300}}>
+          <div style={{fontSize:18,color:C.gold,fontFamily:"'Cinzel',serif",letterSpacing:'0.1em',marginBottom:12}}>Waiting for Player 2</div>
+          <div style={{fontSize:28,color:C.gold,fontFamily:"'Cinzel',serif",letterSpacing:'0.4em',marginBottom:8}}>{roomCode}</div>
+          <div style={{fontSize:11,color:C.textMuted,fontFamily:'sans-serif',marginBottom:24}}>Share this code with your opponent</div>
+          <div style={{width:40,height:40,border:`3px solid ${C.purple}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 1s linear infinite'}}/>
+        </div>
+      )}
+      {netMode==='online'&&!waitingForP2&&(
         <div style={{background:C.bg2,padding:'6px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:`1px solid ${C.border}44`}}>
           <div style={{fontSize:10,color:C.textMuted,fontFamily:'sans-serif',letterSpacing:'0.06em'}}>
             {myPlayer===1?'🟡 PLAYER 1':'🔴 PLAYER 2'} · ROOM {roomCode}
