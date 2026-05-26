@@ -598,10 +598,20 @@ function App(){
   useEffect(()=>{
     if(phase==='ended')return;
     const baseRate=VALOR_REGEN_MS;
+    const tick=phase==='playing'?100/baseRate:200/baseRate;
     const iv=setInterval(()=>{
-      const tick=phase==='playing'?100/baseRate:200/baseRate;
-      setP1(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
-      setP2(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
+      // In online mode only regen for my player — opponent manages their own
+      if(netModeRef.current==='online'){
+        if(myPlayerRef.current===1){
+          setP1(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
+        } else {
+          setP2(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
+        }
+      } else {
+        // Local mode — regen both
+        setP1(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
+        setP2(p=>({...p,valor:Math.min(MAX_VALOR,parseFloat((p.valor+tick).toFixed(3)))}));
+      }
     },100);
     return()=>clearInterval(iv);
   },[phase]);
@@ -640,8 +650,12 @@ function App(){
   }
 
   function doCapture(capturedPiece,capturingPlayer){
-    if(capturingPlayer===1){setP1(p=>{flashValor('p1');return{...p,valor:Math.min(MAX_VALOR,p.valor+1)};});}
-    else{setP2(p=>{flashValor('p2');return{...p,valor:Math.min(MAX_VALOR,p.valor+1)};});}
+    // In online mode only apply valor refund to local player
+    const isLocal=netModeRef.current!=='online'||capturingPlayer===myPlayerRef.current;
+    if(isLocal){
+      if(capturingPlayer===1){setP1(p=>{flashValor('p1');return{...p,valor:Math.min(MAX_VALOR,p.valor+1)};});}
+      else{setP2(p=>{flashValor('p2');return{...p,valor:Math.min(MAX_VALOR,p.valor+1)};});}
+    }
     const losing=capturingPlayer===1?2:1;
     if(losing===1)setP1(p=>({...p,captured:[...p.captured,capturedPiece.type]}));
     else setP2(p=>({...p,captured:[...p.captured,capturedPiece.type]}));
@@ -825,8 +839,7 @@ function App(){
   }
 
   function handleSquareTap(c,r,player){
-    // In online mode, only allow the local player to act
-    if(netMode==='online'&&player!==myPlayerRef.current) return;
+    if(netModeRef.current==='online'&&player!==myPlayerRef.current) return;
     const k=key(c,r);const piece=board[k];
     const inCD=cooldowns[k]&&cooldowns[k]>Date.now();
 
@@ -898,7 +911,7 @@ function App(){
   }
 
   function handleCardTap(pieceType,cardIndex,player,mode){
-    if(netMode==='online'&&player!==myPlayerRef.current) return;
+    if(netModeRef.current==='online'&&player!==myPlayerRef.current) return;
     const cost=mode==='regen'?PIECES[pieceType].regenCost:PIECES[pieceType].deployCost;
     const ps=player===1?p1:p2;
     if(ps.valor<cost)return;
@@ -954,7 +967,7 @@ function App(){
       :[...new Set(ps.captured)].map((type,i)=>({type,index:i,mode:'regen'}));
 
     return(
-      <div style={{transform:player===2?'rotate(180deg)':'none'}}>
+      <div style={{transform:player===2&&netMode==='local'?'rotate(180deg)':'none'}}>
         <div style={{background:'#3d2910',padding:'3px 14px',display:'flex',gap:4,alignItems:'center',borderTop:`1px solid ${C.border2}44`,minHeight:26}}>
           <span style={{fontSize:8,color:'#5a4020',fontFamily:'sans-serif',marginRight:4}}>CAPTURED</span>
           {opponent.captured.map((t,i)=>(
@@ -1208,11 +1221,12 @@ function App(){
         setWaitingForP2(false);
         waitingForP2Ref.current = false;
         setNetStatus('');
-        return; // don't apply state — we just started the game
+        // P2 just joined — don't apply state yet, game just started
+        return;
       }
-      // P2 has joined — apply their moves
+      // P2 already joined — apply incoming state (P2's moves)
       if (!row.player2_joined) return;
-      applyRemoteState(row.state);
+      if (row.state) applyRemoteState(row.state);
     });
     roomChannelRef.current = channel;
     setNetStatus(`Waiting for Player 2 — code: ${code}`);
@@ -1333,7 +1347,7 @@ function App(){
         {formatTimer()}{phase!=='playing'&&<span style={{fontSize:10,marginLeft:8,fontFamily:'sans-serif',letterSpacing:'0.1em'}}>{phase==='overtime'?'OVERTIME':'SUDDEN DEATH'}</span>}
       </div>
       {renderBoard()}
-      {renderPlayerSection(1)}
+      {renderPlayerSection(netMode==='online'?myPlayer:1)}
 
       {promoDialog&&(
         <div style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:100}}>
