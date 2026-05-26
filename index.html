@@ -10,6 +10,9 @@
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{background:#0f0a04;display:flex;justify-content:center;min-height:100vh;}
@@ -23,6 +26,55 @@
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
+
+
+const SUPABASE_URL = 'https://mpbvdhgfmjtnyyxprcth.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_C6Lo_yqHlEyIZke7THKoXg_VAq6ud0k';
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+function generateRoomCode() {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
+async function createRoom(code, initialState) {
+  const { error } = await supabaseClient
+    .from('game_rooms')
+    .insert({ code, state: initialState, player2_joined: false });
+  return !error;
+}
+
+async function joinRoom(code) {
+  const { data, error } = await supabaseClient
+    .from('game_rooms')
+    .select('*')
+    .eq('code', code)
+    .single();
+  if (error || !data) return null;
+  await supabaseClient
+    .from('game_rooms')
+    .update({ player2_joined: true })
+    .eq('code', code);
+  return data;
+}
+
+async function pushState(code, state) {
+  await supabaseClient
+    .from('game_rooms')
+    .update({ state })
+    .eq('code', code);
+}
+
+function subscribeToRoom(code, onUpdate) {
+  return supabaseClient
+    .channel(`room_${code}`)
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'game_rooms',
+      filter: `code=eq.${code}`
+    }, payload => onUpdate(payload.new))
+    .subscribe();
+}
 
 const COLS=7,ROWS=7,FILES=['a','b','c','d','e','f','g'],MAX_VALOR=10,VALOR_REGEN_MS=4000,MATCH_SECONDS=180,OVERTIME_SECONDS=120;
 const PIECES={
@@ -459,6 +511,15 @@ function App(){
   const[guardedSquare,setGuardedSquare]=useState(null);
   const[recallMode,setRecallMode]=useState(null);
   const[gamePhase,setGamePhase]=useState('title');
+  const[netMode,setNetMode]=useState('local'); // local | online
+  const[roomCode,setRoomCode]=useState('');
+  const[myPlayer,setMyPlayer]=useState(1); // which player am I in online mode
+  const[netStatus,setNetStatus]=useState(''); // status message
+  const[joinInput,setJoinInput]=useState('');
+  const[waitingForP2,setWaitingForP2]=useState(false);
+  const roomChannelRef=useRef(null);
+  const myPlayerRef=useRef(1);
+  myPlayerRef.current=myPlayer;
   const[showOptions,setShowOptions]=useState(false);
   const[musicOn,setMusicOn]=useState(true);
   const[captureFlash,setCaptureFlash]=useState(null); // {player, expires}
@@ -625,9 +686,9 @@ function App(){
       setBoard(updatedBoard);
       setCooldowns(cd=>({...cd,[toK]:Date.now()+COOLDOWN_MS[piece.type]}));
       checkPromo(toK,piece,player);
-      // Pass updated board directly — avoids stale ref timing issue
       const enemy=player===1?2:1;
       checkKingRetreat(updatedBoard,enemy,new Set());
+      setTimeout(syncState, 50);
     }
     setSelected(null);setValidMoves([]);
   }
@@ -711,6 +772,7 @@ function App(){
     setSelected(null);setValidMoves([]);
     const enemyD=player===1?2:1;
     checkKingRetreat(deployedBoard,enemyD,new Set());
+    setTimeout(syncState, 50);
   }
 
   function regenPiece(pieceType,toK,player){
@@ -725,6 +787,7 @@ function App(){
     setSelected(null);setValidMoves([]);
     const enemyR=player===1?2:1;
     checkKingRetreat(regenBoard,enemyR,new Set());
+    setTimeout(syncState, 50);
   }
 
   function doGuard(player){
@@ -748,6 +811,8 @@ function App(){
   }
 
   function handleSquareTap(c,r,player){
+    // In online mode, only allow the local player to act
+    if(netMode==='online'&&player!==myPlayerRef.current) return;
     const k=key(c,r);const piece=board[k];
     const inCD=cooldowns[k]&&cooldowns[k]>Date.now();
 
@@ -819,6 +884,7 @@ function App(){
   }
 
   function handleCardTap(pieceType,cardIndex,player,mode){
+    if(netMode==='online'&&player!==myPlayerRef.current) return;
     const cost=mode==='regen'?PIECES[pieceType].regenCost:PIECES[pieceType].deployCost;
     const ps=player===1?p1:p2;
     if(ps.valor<cost)return;
@@ -969,34 +1035,54 @@ function App(){
           REAL-TIME CHESS · VALOR ECONOMY · TWO PLAYERS
         </div>
 
-        {/* Begin button */}
-        <button
-          onClick={()=>{
-            stopTitleMusic(800);
-            setTimeout(()=>{
-              setGamePhase('playing');
-              if(musicOn) setTimeout(()=>startMusic(),900);
-            },800);
-          }}
-          style={{
-            background:'transparent',
-            border:`2px solid ${C.gold}`,
-            color:C.gold,
-            fontSize:14,
-            fontFamily:"'Cinzel',serif",
-            letterSpacing:'0.25em',
-            padding:'14px 44px',
-            cursor:'pointer',
-            marginBottom:24,
-            borderRadius:2,
-          }}
-        >
-          BEGIN
-        </button>
+        {/* Mode buttons */}
+        <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12,marginBottom:32,width:'100%',maxWidth:280}}>
 
-        {/* Local 2P label */}
-        <div style={{fontSize:9,color:C.textMuted,letterSpacing:'0.15em',fontFamily:'sans-serif',marginBottom:48}}>
-          LOCAL TWO-PLAYER
+          {/* Local play */}
+          <button
+            onClick={()=>{
+              setNetMode('local');
+              stopTitleMusic(800);
+              setTimeout(()=>{
+                setGamePhase('playing');
+                if(musicOn) setTimeout(()=>startMusic(),900);
+              },800);
+            }}
+            style={{width:'100%',background:'transparent',border:`2px solid ${C.gold}`,color:C.gold,fontSize:13,fontFamily:"'Cinzel',serif",letterSpacing:'0.2em',padding:'13px 0',cursor:'pointer',borderRadius:2}}
+          >
+            LOCAL 2-PLAYER
+          </button>
+
+          {/* Create online game */}
+          <button
+            onClick={handleCreateGame}
+            style={{width:'100%',background:'transparent',border:`2px solid ${C.border}`,color:C.text,fontSize:13,fontFamily:"'Cinzel',serif",letterSpacing:'0.2em',padding:'13px 0',cursor:'pointer',borderRadius:2}}
+          >
+            CREATE ONLINE GAME
+          </button>
+
+          {/* Join online game */}
+          <div style={{width:'100%',display:'flex',gap:8}}>
+            <input
+              value={joinInput}
+              onChange={e=>setJoinInput(e.target.value.replace(/\D/g,'').slice(0,4))}
+              placeholder="ROOM CODE"
+              maxLength={4}
+              style={{flex:1,background:'transparent',border:`1px solid ${C.border2}`,color:C.gold,fontSize:14,fontFamily:"'Cinzel',serif",letterSpacing:'0.3em',padding:'12px 10px',textAlign:'center',outline:'none',borderRadius:2}}
+            />
+            <button
+              onClick={handleJoinGame}
+              style={{background:C.purple,border:'none',color:'#fff',fontSize:12,fontFamily:"'Cinzel',serif",letterSpacing:'0.1em',padding:'12px 16px',cursor:'pointer',borderRadius:2}}
+            >
+              JOIN
+            </button>
+          </div>
+
+          {/* Status message */}
+          {netStatus&&<div style={{fontSize:11,color:waitingForP2?C.gold:netStatus.includes('not found')||netStatus.includes('Failed')?C.orange:C.green,fontFamily:'sans-serif',letterSpacing:'0.08em',textAlign:'center',padding:'6px 12px',background:'rgba(0,0,0,0.3)',borderRadius:8}}>
+            {waitingForP2&&<span style={{marginRight:6}}>⏳</span>}{netStatus}
+          </div>}
+
         </div>
 
         {/* Piece preview row */}
@@ -1025,7 +1111,7 @@ function App(){
         {captureFlash&&<div style={{position:'absolute',inset:0,background:captureFlash.color,zIndex:10,pointerEvents:'none',borderRadius:4,transition:'opacity 0.4s'}}/>}
         <div style={{display:'grid',gridTemplateColumns:`repeat(${COLS},1fr)`,gap:1.5,background:C.border,border:`2px solid ${C.border}`,borderRadius:4,overflow:'hidden'}}>
           {Array.from({length:ROWS},(_,rowIdx)=>{
-            const r=ROWS-1-rowIdx;
+            const r=netMode==='online'&&myPlayerRef.current===2?rowIdx:ROWS-1-rowIdx;
             return Array.from({length:COLS},(_,c)=>{
               const k=key(c,r);const piece=board[k];const bg=getSqBg(c,r);
               const isVM=validMoves.includes(k);
@@ -1067,6 +1153,103 @@ function App(){
     );
   }
 
+
+
+  async function handleCreateGame() {
+    setNetStatus('Creating room...');
+    const code = generateRoomCode();
+    const d1=shuffle(initialDeck()); const d2=shuffle(initialDeck());
+    const h1=drawHand(d1); const h2=drawHand(d2);
+    const initState = {
+      board: initialBoard(),
+      p1: {valor:5, hand:h1.hand, deck:h1.deck, captured:[]},
+      p2: {valor:5, hand:h2.hand, deck:h2.deck, captured:[]},
+      phase:'playing', timer:180, winner:null,
+      guardedSquare:null, cooldowns:{},
+    };
+    const ok = await createRoom(code, initState);
+    if (!ok) { setNetStatus('Failed to create room. Try again.'); return; }
+    setRoomCode(code);
+    setMyPlayer(1);
+    myPlayerRef.current=1;
+    setWaitingForP2(true);
+    setNetStatus(`Room created! Code: ${code}`);
+    // Subscribe and wait for player 2
+    const channel = subscribeToRoom(code, (row) => {
+      if (row.player2_joined && waitingForP2) {
+        setWaitingForP2(false);
+        setNetStatus('');
+        applyRemoteState(row.state);
+        setNetMode('online');
+        setGamePhase('playing');
+        stopTitleMusic(500);
+        if(musicOn) setTimeout(()=>startMusic(),600);
+      }
+      // Normal state sync during game
+      if (!row.player2_joined) return;
+      applyRemoteState(row.state);
+    });
+    roomChannelRef.current = channel;
+  }
+
+  async function handleJoinGame() {
+    const code = joinInput.trim();
+    if (code.length !== 4) { setNetStatus('Enter a 4-digit code.'); return; }
+    setNetStatus('Joining...');
+    const row = await joinRoom(code);
+    if (!row) { setNetStatus('Room not found. Check the code.'); return; }
+    setRoomCode(code);
+    setMyPlayer(2);
+    myPlayerRef.current=2;
+    setNetMode('online');
+    applyRemoteState(row.state);
+    setNetStatus('');
+    setGamePhase('playing');
+    stopTitleMusic(500);
+    if(musicOn) setTimeout(()=>startMusic(),600);
+    // Subscribe to ongoing updates
+    const channel = subscribeToRoom(code, (updated) => {
+      applyRemoteState(updated.state);
+    });
+    roomChannelRef.current = channel;
+  }
+
+  function serializeState() {
+    // Convert Sets and Maps to serializable form
+    const boardSerial = {};
+    Object.entries(board).forEach(([k,v]) => { boardSerial[k] = v; });
+    return {
+      board: boardSerial,
+      p1: { valor: p1Ref.current.valor, hand: p1Ref.current.hand, deck: p1Ref.current.deck, captured: p1Ref.current.captured },
+      p2: { valor: p2Ref.current.valor, hand: p2Ref.current.hand, deck: p2Ref.current.deck, captured: p2Ref.current.captured },
+      phase: phaseRef.current,
+      timer,
+      winner,
+      guardedSquare,
+      cooldowns: Object.fromEntries(Object.entries(cooldowns).map(([k,v])=>[k,v])),
+    };
+  }
+
+  function applyRemoteState(state) {
+    if (!state) return;
+    setBoard(state.board || {});
+    setP1(state.p1);
+    setP2(state.p2);
+    setPhase(state.phase || 'playing');
+    setTimer(state.timer);
+    if (state.winner) setWinner(state.winner);
+    setGuardedSquare(state.guardedSquare || null);
+    setCooldowns(state.cooldowns || {});
+    setSelected(null);
+    setValidMoves([]);
+  }
+
+  async function syncState() {
+    if (netMode !== 'online' || !roomCode) return;
+    const state = serializeState();
+    await pushState(roomCode, state);
+  }
+
   function resetGame(){
     setBoard(initialBoard());setInTransit(new Set());setCooldowns({});setSelected(null);setValidMoves([]);
     setGuardedSquare(null);setRecallMode(null);
@@ -1083,7 +1266,23 @@ function App(){
         <span style={{fontFamily:"'Cinzel',serif",letterSpacing:'0.1em'}}>Chess of Valor</span>
         <span style={{fontSize:10,color:C.textMuted}}>LOCAL 2P</span>
       </div>
-      {renderPlayerSection(2)}
+      {netMode==='local'&&renderPlayerSection(2)}
+      {netMode==='online'&&(
+        <div style={{background:C.bg2,padding:'6px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:`1px solid ${C.border}44`}}>
+          <div style={{fontSize:10,color:C.textMuted,fontFamily:'sans-serif',letterSpacing:'0.06em'}}>
+            {myPlayer===1?'🟡 PLAYER 1':'🔴 PLAYER 2'} · ROOM {roomCode}
+          </div>
+          <div style={{fontSize:10,color:C.textMuted,fontFamily:'sans-serif'}}>
+            vs PLAYER {myPlayer===1?2:1}
+          </div>
+          <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:2}}>
+            <div style={{fontSize:8,color:C.textMuted,fontFamily:'sans-serif',letterSpacing:'0.06em'}}>OPPONENT VALOR</div>
+            <div style={{width:80,height:8,background:'#1e1230',borderRadius:4,overflow:'hidden'}}>
+              <div style={{height:'100%',borderRadius:4,background:C.purple,width:`${(myPlayer===1?p2:p1).valor*10}%`,transition:'width 0.3s'}}/>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{background:C.bg3,textAlign:'center',padding:'5px',fontSize:16,color:phase!=='playing'?C.orange:C.gold,letterSpacing:'0.15em',borderTop:`1px solid ${C.border2}`,borderBottom:`1px solid ${C.border2}`,animation:phase==='sudden_death'?'flash 0.5s infinite':'none'}}>
         {formatTimer()}{phase!=='playing'&&<span style={{fontSize:10,marginLeft:8,fontFamily:'sans-serif',letterSpacing:'0.1em'}}>{phase==='overtime'?'OVERTIME':'SUDDEN DEATH'}</span>}
       </div>
