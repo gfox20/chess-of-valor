@@ -529,8 +529,9 @@ function App(){
   waitingForP2Ref.current=waitingForP2;
   const[showOptions,setShowOptions]=useState(false);
   const[musicOn,setMusicOn]=useState(true);
-  const[captureFlash,setCaptureFlash]=useState(null); // {player, expires}
-  const[valorDeficit,setValorDeficit]=useState(null); // {square, amount, expires}
+  const[captureFlash,setCaptureFlash]=useState(null);
+  const[valorDeficit,setValorDeficit]=useState(null);
+  const pendingSyncRef=useRef(null); // holds the exact state to push // {square, amount, expires}
   const[moveHints,setMoveHints]=useState(true);
   const[autoRetreat,setAutoRetreat]=useState(true);
   const[matchLength,setMatchLength]=useState(180);
@@ -540,6 +541,26 @@ function App(){
     if(gamePhase==='title') startTitleMusic();
     return ()=>{};
   },[]);
+
+  // Auto-sync: whenever pendingSyncRef has data, push it to Supabase
+  useEffect(()=>{
+    if(!pendingSyncRef.current) return;
+    if(netModeRef.current!=='online'||!roomCodeRef.current) return;
+    const stateToPush = pendingSyncRef.current;
+    pendingSyncRef.current = null;
+    let retries = 0;
+    async function push() {
+      const { error } = await supabaseClient
+        .from('game_rooms')
+        .update({ state: stateToPush })
+        .eq('code', roomCodeRef.current);
+      if (error && retries < 2) {
+        retries++;
+        setTimeout(push, 200);
+      }
+    }
+    push();
+  });
   const stoneTexRef=useRef(null);
   useEffect(()=>{
     // Generate stone textures once for light and dark squares
@@ -661,6 +682,11 @@ function App(){
     else setP2(p=>({...p,captured:[...p.captured,capturedPiece.type]}));
     // Drum taps + board flash for the losing player's team color
     playCaptureDrums(losing);
+    // Sync capture state — captured arrays changed
+    setTimeout(()=>syncState(boardRef.current,
+      {valor:p1Ref.current.valor,hand:p1Ref.current.hand,deck:p1Ref.current.deck,captured:p1Ref.current.captured},
+      {valor:p2Ref.current.valor,hand:p2Ref.current.hand,deck:p2Ref.current.deck,captured:p2Ref.current.captured},
+      {}), 150);
     const flashColor=losing===1?'rgba(201,168,76,0.35)':'rgba(220,50,50,0.35)';
     setCaptureFlash({color:flashColor,expires:Date.now()+400});
     setTimeout(()=>setCaptureFlash(null),420);
@@ -712,7 +738,7 @@ function App(){
       checkKingRetreat(updatedBoard,enemy,new Set());
       const p1Snap=player===1?{...p1Ref.current}:null;
       const p2Snap=player===2?{...p2Ref.current}:null;
-      setTimeout(()=>syncState(updatedBoard,p1Snap,p2Snap,{cooldowns:newCD}), 80);
+      syncState(updatedBoard,p1Snap,p2Snap,{cooldowns:newCD});
     }
     setSelected(null);setValidMoves([]);
   }
@@ -798,7 +824,7 @@ function App(){
     checkKingRetreat(deployedBoard,enemyD,new Set());
     const dP1=player===1?{...p1Ref.current}:null;
     const dP2=player===2?{...p2Ref.current}:null;
-    setTimeout(()=>syncState(deployedBoard,dP1,dP2,{}), 80);
+    syncState(deployedBoard,dP1,dP2,{});
   }
 
   function regenPiece(pieceType,toK,player){
@@ -815,7 +841,7 @@ function App(){
     checkKingRetreat(regenBoard,enemyR,new Set());
     const rP1=player===1?{...p1Ref.current}:null;
     const rP2=player===2?{...p2Ref.current}:null;
-    setTimeout(()=>syncState(regenBoard,rP1,rP2,{}), 80);
+    syncState(regenBoard,rP1,rP2,{});
   }
 
   function doGuard(player){
@@ -1221,15 +1247,25 @@ function App(){
         setWaitingForP2(false);
         waitingForP2Ref.current = false;
         setNetStatus('');
-        // P2 just joined — don't apply state yet, game just started
         return;
       }
-      // P2 already joined — apply incoming state (P2's moves)
       if (!row.player2_joined) return;
       if (row.state) applyRemoteState(row.state);
     });
     roomChannelRef.current = channel;
     setNetStatus(`Waiting for Player 2 — code: ${code}`);
+    // Polling fallback for P1 — fetch every 2s
+    const p1Poll = setInterval(async () => {
+      if(netModeRef.current !== 'online') { clearInterval(p1Poll); return; }
+      if(waitingForP2Ref.current) return; // still waiting, skip
+      const { data } = await supabaseClient
+        .from('game_rooms').select('state,player2_joined').eq('code', roomCodeRef.current).single();
+      if(data?.player2_joined && waitingForP2Ref.current) {
+        setWaitingForP2(false);
+        waitingForP2Ref.current = false;
+      }
+      if(data?.state) applyRemoteState(data.state);
+    }, 2000);
   }
 
   async function handleJoinGame() {
@@ -1239,19 +1275,28 @@ function App(){
     const row = await joinRoom(code);
     if (!row) { setNetStatus('Room not found. Check the code.'); return; }
     setRoomCode(code);
+    roomCodeRef.current = code;
     setMyPlayer(2);
     myPlayerRef.current=2;
     setNetMode('online');
+    netModeRef.current='online';
     applyRemoteState(row.state);
     setNetStatus('');
     setGamePhase('playing');
     stopTitleMusic(500);
     if(musicOn) setTimeout(()=>startMusic(),600);
-    // Subscribe to ongoing updates
+    // Subscribe to realtime updates
     const channel = subscribeToRoom(code, (updated) => {
-      applyRemoteState(updated.state);
+      if(updated.state) applyRemoteState(updated.state);
     });
     roomChannelRef.current = channel;
+    // Polling fallback — fetch latest state every 2s in case realtime misses
+    const pollInterval = setInterval(async () => {
+      if(netModeRef.current !== 'online') { clearInterval(pollInterval); return; }
+      const { data } = await supabaseClient
+        .from('game_rooms').select('state').eq('code', roomCodeRef.current).single();
+      if(data?.state) applyRemoteState(data.state);
+    }, 2000);
   }
 
   function serializeState() {
@@ -1286,20 +1331,18 @@ function App(){
     setValidMoves([]);
   }
 
-  async function syncState(boardSnapshot, p1Snapshot, p2Snapshot, extraState={}) {
+  function syncState(boardSnapshot, p1Snapshot, p2Snapshot, extraState={}) {
     if (netModeRef.current !== 'online' || !roomCodeRef.current) return;
-    const state = {
+    pendingSyncRef.current = {
       board: boardSnapshot,
       p1: p1Snapshot || { valor: p1Ref.current.valor, hand: p1Ref.current.hand, deck: p1Ref.current.deck, captured: p1Ref.current.captured },
       p2: p2Snapshot || { valor: p2Ref.current.valor, hand: p2Ref.current.hand, deck: p2Ref.current.deck, captured: p2Ref.current.captured },
       phase: phaseRef.current,
-      timer: extraState.timer !== undefined ? extraState.timer : null,
       winner: extraState.winner || null,
       guardedSquare: extraState.guardedSquare || null,
       cooldowns: extraState.cooldowns || {},
       lastPlayer: myPlayerRef.current,
     };
-    await pushState(roomCodeRef.current, state);
   }
 
   function resetGame(){
