@@ -537,6 +537,7 @@ function App(){
   const[autoRetreat,setAutoRetreat]=useState(true);
   const[matchLength,setMatchLength]=useState(180);
   const[restartConfirm,setRestartConfirm]=useState(false);
+  const[recentMoves,setRecentMoves]=useState([]);
   useEffect(()=>{ toggleMusic(musicOn); return ()=>{}; },[musicOn]);
   useEffect(()=>{
     if(gamePhase==='title') startTitleMusic();
@@ -658,6 +659,7 @@ function App(){
       const now=Date.now();
       setGuardedSquare(gs=>gs&&gs.expires<=now?null:gs);
       setCooldowns(cd=>{const nc={...cd};let ch=false;Object.keys(nc).forEach(k=>{if(nc[k]<=now){delete nc[k];ch=true;}});return ch?nc:cd;});
+      setRecentMoves(prev=>prev.filter(rm=>now-rm.ts<1500));
     },100);
     return()=>clearInterval(iv);
   },[]);
@@ -729,8 +731,8 @@ function App(){
         // Pass updated board directly — avoids stale ref timing issue
         const enemy=player===1?2:1;
         checkKingRetreat(updatedBoard,enemy,new Set());
-        // Sync non-capturing travel moves — capture case is handled by doCapture's delayed sync
-        if(!target){
+        // Sync travel landing — use liveTarget (not original target) so that pieces that moved away during flight are handled correctly
+        if(!liveTarget){
           const p1Snap=player===1?{...p1Ref.current}:null;
           const p2Snap=player===2?{...p2Ref.current}:null;
           syncState(updatedBoard,p1Snap,p2Snap,{cooldowns:{[toK]:landCD}});
@@ -1224,6 +1226,20 @@ function App(){
     </svg>
   );
 })()}
+                  {!piece&&recentMoves.some(rm=>rm.fromKey===k)&&(()=>{
+  const rm=recentMoves.find(rm=>rm.fromKey===k);
+  const age=Date.now()-rm.ts;
+  const opacity=Math.max(0,0.65*(1-age/1500));
+  const imgSrc=PIECE_IMAGES[rm.piece.type+'_'+(rm.piece.player===1?'ally':'enemy')];
+  return(
+    <div style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center',filter:'blur(1.5px)'}}>
+      {imgSrc
+        ?<img src={imgSrc} alt="" style={{width:'90%',height:'90%',objectFit:'contain'}}/>
+        :<span style={{fontSize:20,lineHeight:1}}>{rm.piece.player===1?PIECES[rm.piece.type].symbol:PIECES[rm.piece.type].enemySymbol}</span>
+      }
+    </div>
+  );
+})()}
                 </div>
               );
             });
@@ -1349,7 +1365,14 @@ function App(){
     // Reject stale polls — only apply if this state is newer than the last one we applied
     if (state.pushedAt && state.pushedAt <= lastAppliedAtRef.current) return;
     if (state.pushedAt) lastAppliedAtRef.current = state.pushedAt;
-    setBoard(state.board || {});
+    // Record departure squares for movement trail — squares that had a piece but are empty in the incoming state
+    const newBoard=state.board||{};
+    const now=Date.now();
+    const departures=Object.entries(boardRef.current)
+      .filter(([k,p])=>!newBoard[k])
+      .map(([k,p])=>({fromKey:k,piece:p,ts:now}));
+    if(departures.length>0)setRecentMoves(prev=>[...prev,...departures]);
+    setBoard(newBoard);
     // Only sync hand/deck/captured — not valor (each client ticks valor locally)
     if (state.p1) setP1(p => ({ ...p, hand: state.p1.hand, deck: state.p1.deck, captured: state.p1.captured }));
     if (state.p2) setP2(p => ({ ...p, hand: state.p2.hand, deck: state.p2.deck, captured: state.p2.captured }));
@@ -1373,8 +1396,8 @@ function App(){
     if (netModeRef.current !== 'online' || !roomCodeRef.current) return;
     pendingSyncRef.current = {
       board: boardSnapshot,
-      p1: p1Snapshot || { valor: p1Ref.current.valor, hand: p1Ref.current.hand, deck: p1Ref.current.deck, captured: p1Ref.current.captured },
-      p2: p2Snapshot || { valor: p2Ref.current.valor, hand: p2Ref.current.hand, deck: p2Ref.current.deck, captured: p2Ref.current.captured },
+      p1: p1Snapshot,
+      p2: p2Snapshot,
       phase: phaseRef.current,
       winner: extraState.winner || null,
       guardedSquare: extraState.guardedSquare || null,
