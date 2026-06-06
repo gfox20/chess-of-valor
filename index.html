@@ -723,11 +723,11 @@ function App(){
         const updatedBoard={...boardRef.current};
         delete updatedBoard[fromK];
         updatedBoard[toK]=piece;
+        if(piece.type==='pawn'){const{r:pr}=fromKey(toK);if((player===1&&pr===6)||(player===2&&pr===0))updatedBoard[toK]={...piece,type:'queen'};}
         setBoard(updatedBoard);
         setInTransit(t=>{const nt=new Set(t);nt.delete(fromK);return nt;});
-        const landCD=Date.now()+COOLDOWN_MS[piece.type];
+        const landCD=Date.now()+COOLDOWN_MS[updatedBoard[toK].type];
         setCooldowns(cd=>({...cd,[toK]:landCD}));
-        checkPromo(toK,piece,player);
         // Pass updated board directly — avoids stale ref timing issue
         const enemy=player===1?2:1;
         checkKingRetreat(updatedBoard,enemy,new Set());
@@ -745,10 +745,10 @@ function App(){
       const updatedBoard={...boardRef.current};
       delete updatedBoard[fromK];
       updatedBoard[toK]=piece;
+      if(piece.type==='pawn'){const{r:pr}=fromKey(toK);if((player===1&&pr===6)||(player===2&&pr===0))updatedBoard[toK]={...piece,type:'queen'};}
       setBoard(updatedBoard);
-      const newCD={...cooldowns,[toK]:Date.now()+COOLDOWN_MS[piece.type]};
+      const newCD={...cooldowns,[toK]:Date.now()+COOLDOWN_MS[updatedBoard[toK].type]};
       setCooldowns(newCD);
-      checkPromo(toK,piece,player);
       const enemy=player===1?2:1;
       checkKingRetreat(updatedBoard,enemy,new Set());
       const p1Snap=player===1?{...p1Ref.current}:null;
@@ -1199,7 +1199,7 @@ function App(){
                 :{};
               const showDeficit=valorDeficit?.square===k;
               return(
-                <div key={k} style={{aspectRatio:'1',display:'flex',alignItems:'center',justifyContent:'center',background:bg,...stoneStyle,cursor:'pointer',position:'relative',transition:'background 0.15s',outline:guardedSquare?.square===k?'3px solid #1D9E75':'none',outlineOffset:'-3px',zIndex:guardedSquare?.square===k?1:0}}
+                <div key={k} style={{aspectRatio:'1',display:'flex',alignItems:'center',justifyContent:'center',background:bg,...stoneStyle,cursor:'pointer',position:'relative',transition:'background 0.15s',outline:guardedSquare?.square===k?'3px solid #1D9E75':'none',outlineOffset:'-3px',zIndex:guardedSquare?.square===k?1:0,boxShadow:piece&&piece.player!==myPlayer?'inset 0 0 0 2.5px rgba(220,60,60,0.75)':undefined}}
                   onClick={()=>{const actingPlayer=selected?.player||recallMode||(piece?.player);if(actingPlayer)handleSquareTap(c,r,actingPlayer);}}>
                   {showDeficit&&<div style={{position:'absolute',top:-10,left:'50%',transform:'translateX(-50%)',background:'#1e1230',border:`1px solid ${C.purpleL}`,color:C.purpleL,fontSize:10,fontWeight:700,fontFamily:'sans-serif',padding:'2px 6px',borderRadius:10,whiteSpace:'nowrap',zIndex:20,animation:'deficitPop 1.2s ease-out forwards',pointerEvents:'none'}}>
                     -{valorDeficit.amount} valor
@@ -1230,18 +1230,26 @@ function App(){
     </svg>
   );
 })()}
+                  {piece&&recentMoves.some(rm=>rm.toKey===k)&&(()=>{
+  const rm=recentMoves.find(rm=>rm.toKey===k);
+  const age=Date.now()-rm.ts;
+  const f=Math.max(0,1-age/1000);
+  return(
+    <div style={{position:'absolute',inset:0,pointerEvents:'none',borderRadius:2,
+      background:`rgba(30,144,255,${0.35*f})`,
+      boxShadow:`inset 0 0 0 3px rgba(30,144,255,${f})`}}/>
+  );
+})()}
                   {!piece&&recentMoves.some(rm=>rm.fromKey===k)&&(()=>{
   const rm=recentMoves.find(rm=>rm.fromKey===k);
   const age=Date.now()-rm.ts;
-  const opacity=Math.max(0,0.9*(1-age/1500));
+  const f=Math.max(0,1-age/1200);
   const imgSrc=PIECE_IMAGES[rm.piece.type+'_'+(rm.piece.player===1?'ally':'enemy')];
-  const tint=rm.piece.player===1?'rgba(201,168,76,0.25)':'rgba(200,60,60,0.25)';
   return(
-    <div style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div style={{position:'absolute',inset:0,background:tint,borderRadius:2}}/>
+    <div style={{position:'absolute',inset:0,background:`rgba(30,144,255,${0.55*f})`,pointerEvents:'none',borderRadius:2,display:'flex',alignItems:'center',justifyContent:'center'}}>
       {imgSrc
-        ?<img src={imgSrc} alt="" style={{width:'90%',height:'90%',objectFit:'contain',position:'relative'}}/>
-        :<span style={{fontSize:20,lineHeight:1,position:'relative'}}>{rm.piece.player===1?PIECES[rm.piece.type].symbol:PIECES[rm.piece.type].enemySymbol}</span>
+        ?<img src={imgSrc} alt="" style={{width:'85%',height:'85%',objectFit:'contain',opacity:0.75*f,position:'relative'}}/>
+        :<span style={{fontSize:18,lineHeight:1,opacity:0.75*f,position:'relative'}}>{rm.piece.player===1?PIECES[rm.piece.type].symbol:PIECES[rm.piece.type].enemySymbol}</span>
       }
     </div>
   );
@@ -1371,13 +1379,18 @@ function App(){
     // Reject stale polls — only apply if this state is newer than the last one we applied
     if (state.pushedAt && state.pushedAt <= lastAppliedAtRef.current) return;
     if (state.pushedAt) lastAppliedAtRef.current = state.pushedAt;
-    // Record departure squares for movement trail — squares that had a piece but are empty in the incoming state
+    // Record from/to squares for movement trail
     const newBoard=state.board||{};
     const now=Date.now();
-    const departures=Object.entries(boardRef.current)
-      .filter(([k,p])=>!newBoard[k])
-      .map(([k,p])=>({fromKey:k,piece:p,ts:now}));
-    if(departures.length>0)setRecentMoves(prev=>[...prev,...departures]);
+    const oldBoard=boardRef.current;
+    const newMoves=[];
+    Object.entries(oldBoard).forEach(([k,piece])=>{
+      if(!newBoard[k]){
+        const toKey=Object.keys(newBoard).find(nk=>!oldBoard[nk]&&newBoard[nk].player===piece.player&&newBoard[nk].type===piece.type)||null;
+        newMoves.push({fromKey:k,toKey,piece,ts:now});
+      }
+    });
+    if(newMoves.length>0)setRecentMoves(prev=>[...prev,...newMoves]);
     setBoard(newBoard);
     // Only sync hand/deck/captured — not valor (each client ticks valor locally)
     if (state.p1) setP1(p => ({ ...p, hand: state.p1.hand, deck: state.p1.deck, captured: state.p1.captured }));
