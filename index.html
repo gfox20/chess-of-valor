@@ -760,6 +760,7 @@ function App(){
 
   function checkKingRetreat(currentBoard,player,currentInTransit){
     if(!autoRetreatRef.current)return;
+    if(phaseRef.current==='ended')return;
     // Sudden death disables auto-retreat
     if(phaseRef.current==='sudden_death')return;
     const kingEntry=Object.entries(currentBoard).find(([k,p])=>p.player===player&&p.type==='king');
@@ -803,6 +804,9 @@ function App(){
     }
     const setP=player===1?setP1:setP2;
     setP(p=>({...p,valor:Math.max(0,p.valor-1)}));
+    // Force boardRef immediately so rapid follow-up taps read the retreated position before React re-renders
+    const retreatedBoard={...currentBoard};delete retreatedBoard[kingK];retreatedBoard[targetK]=kingPiece;
+    boardRef.current=retreatedBoard;
     setBoard(b=>{const nb={...b};delete nb[kingK];nb[targetK]=kingPiece;return nb;});
     setCooldowns(cd=>({...cd,[targetK]:Date.now()+COOLDOWN_MS.king}));
   }
@@ -1229,13 +1233,15 @@ function App(){
                   {!piece&&recentMoves.some(rm=>rm.fromKey===k)&&(()=>{
   const rm=recentMoves.find(rm=>rm.fromKey===k);
   const age=Date.now()-rm.ts;
-  const opacity=Math.max(0,0.65*(1-age/1500));
+  const opacity=Math.max(0,0.9*(1-age/1500));
   const imgSrc=PIECE_IMAGES[rm.piece.type+'_'+(rm.piece.player===1?'ally':'enemy')];
+  const tint=rm.piece.player===1?'rgba(201,168,76,0.25)':'rgba(200,60,60,0.25)';
   return(
-    <div style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center',filter:'blur(1.5px)'}}>
+    <div style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{position:'absolute',inset:0,background:tint,borderRadius:2}}/>
       {imgSrc
-        ?<img src={imgSrc} alt="" style={{width:'90%',height:'90%',objectFit:'contain'}}/>
-        :<span style={{fontSize:20,lineHeight:1}}>{rm.piece.player===1?PIECES[rm.piece.type].symbol:PIECES[rm.piece.type].enemySymbol}</span>
+        ?<img src={imgSrc} alt="" style={{width:'90%',height:'90%',objectFit:'contain',position:'relative'}}/>
+        :<span style={{fontSize:20,lineHeight:1,position:'relative'}}>{rm.piece.player===1?PIECES[rm.piece.type].symbol:PIECES[rm.piece.type].enemySymbol}</span>
       }
     </div>
   );
