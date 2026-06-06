@@ -532,6 +532,7 @@ function App(){
   const[captureFlash,setCaptureFlash]=useState(null);
   const[valorDeficit,setValorDeficit]=useState(null);
   const pendingSyncRef=useRef(null); // holds the exact state to push // {square, amount, expires}
+  const lastAppliedAtRef=useRef(0); // timestamp of last remote state we applied — rejects stale polls
   const[moveHints,setMoveHints]=useState(true);
   const[autoRetreat,setAutoRetreat]=useState(true);
   const[matchLength,setMatchLength]=useState(180);
@@ -605,8 +606,10 @@ function App(){
   },[]);
   const boardRef=useRef(board);const phaseRef=useRef(phase);
   const p1Ref=useRef(p1);const p2Ref=useRef(p2);
+  const selectedRef=useRef(null);
   const autoRetreatRef=useRef(true);
   boardRef.current=board;phaseRef.current=phase;p1Ref.current=p1;p2Ref.current=p2;
+  selectedRef.current=selected;
   autoRetreatRef.current=autoRetreat;
 
   useEffect(()=>{
@@ -682,15 +685,16 @@ function App(){
     else setP2(p=>({...p,captured:[...p.captured,capturedPiece.type]}));
     // Drum taps + board flash for the losing player's team color
     playCaptureDrums(losing);
-    // Sync capture state — captured arrays changed
+    // Sync capture state — pass winner when king is captured so remote sees game over
+    const isKingCapture=capturedPiece.type==='king';
     setTimeout(()=>syncState(boardRef.current,
       {valor:p1Ref.current.valor,hand:p1Ref.current.hand,deck:p1Ref.current.deck,captured:p1Ref.current.captured},
       {valor:p2Ref.current.valor,hand:p2Ref.current.hand,deck:p2Ref.current.deck,captured:p2Ref.current.captured},
-      {}), 150);
+      isKingCapture?{winner:capturingPlayer}:{}), 150);
     const flashColor=losing===1?'rgba(201,168,76,0.35)':'rgba(220,50,50,0.35)';
     setCaptureFlash({color:flashColor,expires:Date.now()+400});
     setTimeout(()=>setCaptureFlash(null),420);
-    if(capturedPiece.type==='king'){playVictoryFanfare();setWinner(capturingPlayer);setPhase('ended');}
+    if(isKingCapture){playVictoryFanfare();setWinner(capturingPlayer);setPhase('ended');}
   }
 
   function movePiece(fromK,toK,player){
@@ -717,11 +721,18 @@ function App(){
         updatedBoard[toK]=piece;
         setBoard(updatedBoard);
         setInTransit(t=>{const nt=new Set(t);nt.delete(fromK);return nt;});
-        setCooldowns(cd=>({...cd,[toK]:Date.now()+COOLDOWN_MS[piece.type]}));
+        const landCD=Date.now()+COOLDOWN_MS[piece.type];
+        setCooldowns(cd=>({...cd,[toK]:landCD}));
         checkPromo(toK,piece,player);
         // Pass updated board directly — avoids stale ref timing issue
         const enemy=player===1?2:1;
         checkKingRetreat(updatedBoard,enemy,new Set());
+        // Sync non-capturing travel moves — capture case is handled by doCapture's delayed sync
+        if(!target){
+          const p1Snap=player===1?{...p1Ref.current}:null;
+          const p2Snap=player===2?{...p2Ref.current}:null;
+          syncState(updatedBoard,p1Snap,p2Snap,{cooldowns:{[toK]:landCD}});
+        }
       },travel);
     }else{
       if(target)doCapture(target,player);
@@ -1041,7 +1052,7 @@ function App(){
           {[
             {icon:'ti-shield',label:'GUARD',danger:false,active:selected?.type==='guard'&&selected?.player===player,action:()=>doGuard(player),cost:2},
             {icon:'ti-refresh',label:'RECALL',danger:false,active:recallMode===player,action:()=>doRecall(player),cost:2},
-            {icon:'ti-flag',label:'RESIGN',danger:true,active:false,action:()=>{setWinner(player===1?2:1);setPhase('ended');},cost:null},
+            {icon:'ti-flag',label:'RESIGN',danger:true,active:false,action:()=>{const w=player===1?2:1;setWinner(w);setPhase('ended');setTimeout(()=>syncState(boardRef.current,{valor:p1Ref.current.valor,hand:p1Ref.current.hand,deck:p1Ref.current.deck,captured:p1Ref.current.captured},{valor:p2Ref.current.valor,hand:p2Ref.current.hand,deck:p2Ref.current.deck,captured:p2Ref.current.captured},{winner:w}),150);},cost:null},
             {icon:'ti-settings',label:'OPTIONS',danger:false,active:showOptions,action:()=>setShowOptions(s=>!s),cost:null},
           ].map(btn=>(
             <button key={btn.label} onClick={btn.action||undefined}
@@ -1319,6 +1330,9 @@ function App(){
     if (!state) return;
     // Don't apply state that we just sent — would cause echo
     if (state.lastPlayer === myPlayerRef.current) return;
+    // Reject stale polls — only apply if this state is newer than the last one we applied
+    if (state.pushedAt && state.pushedAt <= lastAppliedAtRef.current) return;
+    if (state.pushedAt) lastAppliedAtRef.current = state.pushedAt;
     setBoard(state.board || {});
     // Only sync hand/deck/captured — not valor (each client ticks valor locally)
     if (state.p1) setP1(p => ({ ...p, hand: state.p1.hand, deck: state.p1.deck, captured: state.p1.captured }));
@@ -1326,9 +1340,17 @@ function App(){
     if (state.phase) setPhase(state.phase);
     if (state.winner) setWinner(state.winner);
     if (state.guardedSquare !== undefined) setGuardedSquare(state.guardedSquare || null);
-    if (state.cooldowns) setCooldowns(state.cooldowns);
-    setSelected(null);
-    setValidMoves([]);
+    // Merge cooldowns rather than replacing — prevents clearing unrelated piece cooldowns
+    if (state.cooldowns && Object.keys(state.cooldowns).length > 0) setCooldowns(cd => ({...cd, ...state.cooldowns}));
+    // Keep piece selection if the selected piece still exists — clearing it mid-move is why taps get dropped
+    const sel=selectedRef.current;
+    const nb=state.board||{};
+    if(sel?.type==='piece'&&nb[sel.key]&&nb[sel.key].player===sel.player){
+      setValidMoves(getMoves(nb,sel.key,sel.player,new Set()));
+    }else{
+      setSelected(null);
+      setValidMoves([]);
+    }
   }
 
   function syncState(boardSnapshot, p1Snapshot, p2Snapshot, extraState={}) {
@@ -1342,6 +1364,7 @@ function App(){
       guardedSquare: extraState.guardedSquare || null,
       cooldowns: extraState.cooldowns || {},
       lastPlayer: myPlayerRef.current,
+      pushedAt: Date.now(),
     };
   }
 
